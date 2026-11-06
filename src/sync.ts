@@ -148,9 +148,14 @@ function setBase(rel: string, data: Uint8Array | null) {
   if (data) writeAtomic(f, data); else rmSync(f, { force: true });
 }
 const getBase = (rel: string): Uint8Array | null => { try { return new Uint8Array(readFileSync(join(BASE(), rel))); } catch { return null; } };
-function stamp(rel: string): { m: number; s: number } {
+function rawStamp(rel: string): { m: number; s: number } {
   try { const st = statSync(join(D(), rel)); return { m: st.mtimeMs, s: st.size }; } catch { return { m: -1, s: -1 }; }
 }
+/** An mtime this recent can't be trusted yet: a same-size rewrite in the same mtime tick would look unchanged,
+ *  so record -1 and let the next scan re-hash (git's "racy clean" rule). */
+const settled = (m: number) => (Date.now() - m > 2000 ? m : -1);
+/** The stamp to record for a file whose content we just hashed or wrote. */
+function stamp(rel: string): { m: number; s: number } { const r = rawStamp(rel); return { m: settled(r.m), s: r.s }; }
 
 export type Change = { path: string; base_version: number; content?: string; deleted?: true; _bytes?: Uint8Array; _hash?: string };
 
@@ -161,13 +166,13 @@ export function scan(st: State): Change[] {
   for (const rel of walk()) {
     seen.add(rel);
     const e = st.files[rel];
-    const { m, s } = stamp(rel);
+    const { m, s } = rawStamp(rel);
     if (e && e.m === m && e.s === s) continue;
     const data = readLocal(rel);
     if (!data) continue;
     if (data.length > MAX_FILE) { console.error(`sync: skipping ${rel} (${data.length} bytes > ${MAX_FILE}); keep large files outside the data folder`); continue; }
     const h = hash(data);
-    if (e && e.h === h) { e.m = m; e.s = s; continue; }
+    if (e && e.h === h) { e.m = settled(m); e.s = s; continue; }
     changes.push({ path: rel, base_version: e?.v ?? 0, content: b64(data), _bytes: data, _hash: h });
   }
   for (const [rel, e] of Object.entries(st.files)) if (!seen.has(rel) && !ignored(rel)) changes.push({ path: rel, base_version: e.v, deleted: true });
